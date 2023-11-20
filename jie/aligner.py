@@ -679,3 +679,80 @@ def find_all_chr(cell_pts_input,
 
     return all_put_chr
 
+
+# Function to sort picked spots based on (local) fiber density, this would help resolve less probable trans-homolog transversing (like "fiber swapping during tracing")
+def sort_spots_by_fiber_density (picked_chr_pts_cell, _iter_num_th = 30, _local_reg_num = 30):
+    #import scipy
+    from scipy.spatial.distance import cdist
+    from itertools import permutations
+
+    picked_chr_pts_cell_new =  picked_chr_pts_cell.copy(deep=True)
+    chosen_chrom = picked_chr_pts_cell_new['chr'].values[0]
+    cell_id = picked_chr_pts_cell_new['orig_cellID'].values[0]
+
+    # process if more than one fiber exists for a cell
+    if len(np.unique(picked_chr_pts_cell_new['fiberidx'])) >1:
+        sel_pts_zxyhfa = picked_chr_pts_cell[['z_hat','x_hat','y_hat','hyb','fiberidx']].copy(deep=True)
+        sel_pts_zxyhfa['fiberidx_jie']=sel_pts_zxyhfa['fiberidx']
+        _iter = 0
+        while _iter <_iter_num_th:
+            _iter +=1
+            curr_fiberidx = sel_pts_zxyhfa['fiberidx'] # flag the current fiberidx
+            picked_hyb_list = sorted(np.unique(sel_pts_zxyhfa['hyb']))
+            # 10% of the longest picked fiber as local ref 
+            _neighbor_len = round(np.max(picked_hyb_list)/5)
+            for _hyb in picked_hyb_list:
+                # sel_pts_zxyhfa below will be updated after processing each hyb
+                _cand_spots = sel_pts_zxyhfa[sel_pts_zxyhfa['hyb']==_hyb]
+                # local neighboring region
+                _start, _end = max(_hyb - _neighbor_len, np.min(picked_hyb_list)), min(_hyb + _neighbor_len, np.max(picked_hyb_list)) 
+                ref_ct_list = []
+                # assign spots to closest fiber
+                for _fiber_id in np.unique(sel_pts_zxyhfa['fiberidx']): # order of fibers to use
+                    sel_pts_cluster = sel_pts_zxyhfa[sel_pts_zxyhfa['fiberidx']==_fiber_id]
+                    _local_hyb_list = np.intersect1d(np.arange(_start, _end+1), np.unique(sel_pts_cluster['hyb']))
+                    # use local center if there are enough nearby spots
+                    if len(_local_hyb_list) >= _local_reg_num:
+                        ref_spots = sel_pts_cluster[sel_pts_cluster['hyb'].isin(_local_hyb_list)]
+                    # use all the decoded chr fiber center
+                    else:
+                        ref_spots = sel_pts_cluster.copy(deep=True)
+                    ref_ct = np.nanmean(ref_spots[['z_hat','x_hat','y_hat']],axis=0) # local center coords
+                    ref_ct_list.append(ref_ct)
+                # dist matrix for cand_spots and ref_centers
+                ref_cts = np.array(ref_ct_list)
+                _dist_mtx =  cdist(_cand_spots[['z_hat','x_hat','y_hat']],ref_cts)
+                # re-assign for fibers based on the min summed distance
+                _cand_spots_new = _cand_spots.copy(deep=True)
+                _l = list(permutations(range(0, len(ref_cts)),len(_dist_mtx)))
+                _sum_dist_list = []
+                for _i in _l:
+                    # distance sum for this permutation
+                    _dist_sum = 0
+                    for _spot_index in range(len(_dist_mtx)):
+                        _dist_sum += _dist_mtx [_spot_index,_i[_spot_index]] 
+                    _sum_dist_list.append(_dist_sum)
+                ########################################## 
+                # pick the permutation with lowest summed distance
+                _exchanged_index = _l[np.argmin(_sum_dist_list)]
+                _cand_spots_new['fiberidx']= np.unique(sel_pts_zxyhfa['fiberidx'])[list(_exchanged_index)]
+                # assign back to the sel_pts_zxyhfa for the next hyb
+                sel_pts_zxyhfa_new = sel_pts_zxyhfa.copy(deep=True)
+                sel_pts_zxyhfa_new[sel_pts_zxyhfa_new['hyb']==_hyb] = _cand_spots_new
+                sel_pts_zxyhfa = sel_pts_zxyhfa_new.copy(deep=True)
+
+            # check reshuffling rate
+            num_change = np.sum(sel_pts_zxyhfa['fiberidx']!=curr_fiberidx)
+            rate_change = num_change/len(sel_pts_zxyhfa)
+            if rate_change<=0.001:
+                break
+                
+        print(f'Complete sorting for {chosen_chrom} in {cell_id} within {_iter} iteration(s).')
+        picked_chr_pts_cell_new[['z_hat','x_hat','y_hat','hyb','fiberidx','fiberidx_jie']]=sel_pts_zxyhfa[['z_hat','x_hat','y_hat','hyb','fiberidx','fiberidx_jie']]
+        
+    # skip if only one fiber
+    else:
+        picked_chr_pts_cell_new['fiberidx_jie']=picked_chr_pts_cell_new['fiberidx']
+        print(f'Skip sorting for {chosen_chrom} in {cell_id} because there is only one fiber.')
+        
+    return picked_chr_pts_cell_new
