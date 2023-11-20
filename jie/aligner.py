@@ -8,106 +8,51 @@
 # The full license is in the file LICENSE.txt, distributed with this software.
 #-----------------------------------------------------------------------------
 
+from importlib import reload
+from . import utilities
+reload(utilities)
+
+
 import numpy as np
 import pandas as pd
 import igraph
 import copy
 import warnings
 import random
+from scipy.spatial.distance import cdist
 
 from collections.abc import Iterable
 
 from .utilities import (cartesian_esqsum, 
                         cartesian_sqdiff, 
                         cartesian_diff, 
-                        check_lp_wgaps,
+                        calculate_s0_sqr,
                         find_loci_dist)
 
-def log_bond(l_p, ideal_l, r, svt=False):
-    '''
-    Input:
-        l_p: float
-            persistence length
-        ideal_l: float 
-           distance of one bond length given bin_size
-        r: float
-            distance of observed bond
-        svn: boolean
-            indicates use of spherical volume term arising from integration (Default = False)
-    Output:
-        prob: float
-            log probability of polymer segment
-    '''
-    if not isinstance(l_p, (int, float, np.int64, np.float64)):
-        raise TypeError('l_p needs to be a numerical value.')
-    if l_p <= 0:
-        raise ValueError('l_p must be a positive value.')
-    if not isinstance(ideal_l, (int, float, np.int64, np.float64)):
-        raise TypeError('ideal_l needs to be a numerical value.')
-    if ideal_l <= 0:
-        raise ValueError('ideal_l must be a positive value.')
-        
-    # calculate uncertainty
-    ## NB: l_p usually in pixels, ideal_l can be bp (unless corr_fac**2 --> penalty)
-    s_sq = 2*l_p*ideal_l/3 
+scale_factor_global = 1.1
+
+# this should be smaller for the factor for threshold and edge penalty, allowing truncated fiber to be picked
+boundary_scale_factor = 1.5
+
+def log_bond(genomic_interval, l_p_bp, corr_factor, stretch_factor=1.0):
+    s0_sqr = 2* genomic_interval * l_p_bp * corr_factor**2
     
-    # calculate bond probability
-    if svt:
-        prob = -2*np.log(r) - np.log(np.power((2*np.pi*s_sq), -3/2)) + ((r**2)/(2*s_sq))
-    else:
-        prob = - np.log(np.power((2*np.pi*s_sq), -3/2)) + ((r**2)/(2*s_sq))
+    # calculate relative penalty
+    expected_edge_weights =  3/2 * (np.log(2/3*np.pi*s0_sqr) + stretch_factor)
     
-    return prob
-    
-    
-def log_bond_vect(l_p_arr, ideal_l_arr, r_arr):
-    '''
-    Input:
-        l_p_arr: [curr_hyb x next_hyb]
-            2D array of persistence length
-        ideal_l_arr: [curr_hyb x next_hyb] 
-            2D array of ideal bond distances
-        r_arr: [curr_hyb x next_hyb]
-            2D array of observed bond distances
-    Output:
-        prob_arr: [curr_hyb x next_hyb] 
-            2D array of log probability of polymer segments        
-    '''
-    if not isinstance(l_p_arr, np.ndarray):
-        raise TypeError('l_p_arr needs to be an array.')
-    if l_p_arr.dtype != float and l_p_arr.dtype != int:
-        raise TypeError('l_p_arr needs to be an array of numerical values')
-    if not np.all(l_p_arr > 0):
-        raise ValueError('l_p_arr needs to be an array of positive numerical values.')
-    if not isinstance(ideal_l_arr, np.ndarray):
-        raise TypeError('ideal_l needs to be an array.')
-    if ideal_l_arr.dtype != float and ideal_l_arr.dtype != int:
-        raise TypeError('ideal_l_arr needs to be an array of numerical values')
-    if not np.all(ideal_l_arr > 0):
-        raise ValueError('ideal_l_arr needs to be an array of positive numerical values.') 
-    if not isinstance(r_arr, np.ndarray):
-        raise TypeError('r_arr needs to be an array.')
-    if r_arr.dtype != float and r_arr.dtype != int:
-        raise TypeError('r_arr needs to be an array of numerical values')  
-    
-    # calculate uncertainty
-    ## NB: l_p_arr usually in pixels, ideal_l can be bp (unless corr_fac ** 2 --> penalty)
-    s_sq_arr = (2/3)*np.multiply(l_p_arr, ideal_l_arr)
-    
-    # calculate bond probability
-    prob_arr = -np.log(np.power((2*np.pi*s_sq_arr), -3/2)) + ((r_arr**2)/(2*s_sq_arr))
-    
-    return prob_arr
+    return expected_edge_weights
 
 
-def cdf_thresh(gene_dist, l_p_bp):
+def cdf_thresh(gene_dist, l_p_bp=150., corr_factor=0.3/108.):
     '''
     Input:
         gene_dist: [list]
             list of genomic distances relative to starting loci
             eg. [0, 5kb, 10kb, 15kb, ...]
         l_p_bp: float
-            persistence length (bp)
+            persistence length (bp) - here 150bp nucleosome DNA with 30bp linker
+        corr_factor: float
+            nm per persistence length (20nm) / pixel_dist = 108
     Output:
         total_score: float
             conformational distribution function (CDF) threshold score for for calling chr
@@ -130,36 +75,29 @@ def cdf_thresh(gene_dist, l_p_bp):
     if l_p_bp < 0:
         raise ValueError('l_p_bp needs to be greater than 0.')
     
-    # scramble genomic positions
-    gene_dist_scrambled = copy.deepcopy(gene_dist)
-    random.shuffle(gene_dist_scrambled) # in place
+    s0_sqr = 2 * np.array([(gene_dist[i]-gene_dist[i-1]) * l_p_bp * corr_factor**2 for i in range(1, len(gene_dist))])
+       
+    # calculate relative penalty
+    expected_edge_weights = [3/2 * (np.log(2/3*np.pi*s0_sqr) + 1)]
     
-    if np.all(gene_dist_scrambled == gene_dist):
-        warnings.warn('gene_dist not scrambled during CDF threshold estimation.')
-        
-    # calculate new genomic distances
-    gene_delta = [y - x for x,y in zip(gene_dist,gene_dist[1:])]
-    gene_delta_scrambled = [ np.abs(y - x) for x,y in zip(gene_dist_scrambled,gene_dist_scrambled[1:])]
-    
-    # calculate path
-    total_score = 0
-    for ideal_l, r in zip(gene_delta, gene_delta_scrambled):
-        total_score += log_bond(l_p_bp, ideal_l, r)
-    
-    return total_score
+    return scale_factor_global*np.sum(expected_edge_weights)
 
     
-def edge_penalty(skips, l_p_bp, corr_fac, bin_size):
+def edge_penalty(current_hyb, skips, l_p_bp, corr_fac, gene_dist_matrix, scale_factor=1.0):
     '''
     Input:
+        current_hyb:
+            current hybridization value
         skips: [curr_hyb x next_hyb]
             2D array of degrees-of-separation between nodes
         l_p_bp: float 
             persistence length (bp)
         corr_fac: float 
-            scale genomic dist (bp) into pixels (e.g nm_per_bp / pixel_dist)
-        bin_size: float 
-            median genomic distance interval (bp)
+            scale genomic dist (bp) into pixels (e.g nm_per_unit / pixel_dist)
+        gene_dist_matrix: float 
+             genomic distance interval (bp) matrix
+        scale_factor: float
+            scale the penalty
     Output:
         penalty: [curr_hyb x next_hyb] 
             2D array of penalty per transition edge weight
@@ -178,35 +116,36 @@ def edge_penalty(skips, l_p_bp, corr_fac, bin_size):
     
     if corr_fac < 0:
         raise ValueError('corr_fac needs to be a positive numerical value.')
-        
-    if not isinstance(bin_size, (int, float, np.int64, np.float64)):
-        raise TypeError('bin_size needs to be a numerical value.')
-    
-    if bin_size < 0:
-        raise ValueError('bin_size needs to be a positive numerical value.')
-    
-    # broadcast persistence length
-    l_p_arr = np.full(skips.shape, l_p_bp*corr_fac)
-    
-    # calculate estimated bond lengths
-    ideal_l_mult_arr = (skips + 1)*bin_size*corr_fac
-    
-    # calculate single bond length
-    ideal_l_sing_arr = np.full(skips.shape, bin_size*corr_fac)
-    
-    # evaluate relative length w.r.t. single bond length
-    # NB: (additional corr_fac --> better behaviour)
-    ratio = (log_bond_vect(l_p_arr, ideal_l_mult_arr, ideal_l_mult_arr) / 
-             log_bond_vect(l_p_arr, ideal_l_sing_arr, ideal_l_sing_arr) )
-    
-    # calculate relative penalty
-    penalty = np.divide(1.01*(skips+1), ratio)
-    
-    # adjacent bonds not penalized
-    penalty[skips == 0] = 1
-    
-    return penalty
 
+    # calculate relative penalty
+    next_hyb_values = current_hyb + np.ravel(skips) + 1
+    penalty_linear_const = []
+    for next_hyb in next_hyb_values:
+        _dist = 0
+        for i in range(current_hyb, next_hyb, 1):
+            _dist += log_bond(gene_dist_matrix[i, i+1],  l_p_bp, corr_fac, 1.0)
+        total_skip_dist = log_bond(gene_dist_matrix[current_hyb, next_hyb],  l_p_bp, corr_fac, 1.0)
+        penalty_linear_const.append(_dist/total_skip_dist)
+        
+
+    penalty_const = np.array(penalty_linear_const).reshape(skips.shape)
+    # multiply the penalty score based on how many skips
+    # penalize more if skipping too many nodes
+    penalty_exp = 2*skips - 2
+    penalty_exp[skips==0] = 1
+    penalty_exp[skips==1] = 2
+
+    return penalty_const, penalty_exp
+
+def single_edge_penalty(real_distance_sqr, penalty_value_base, penalty_threshold, pixel_dist):
+    # this function penalize single edge that are too long
+    
+    penalty_threshold_pixel = (penalty_threshold/pixel_dist)*(penalty_threshold/pixel_dist)
+    _real = real_distance_sqr*(pixel_dist/1000)*(pixel_dist/1000)
+    penalty = _real * penalty_value_base
+    penalty [real_distance_sqr<=penalty_threshold_pixel] = 0
+    return penalty
+    
 
 def edge_weights(pts_clr_curr, 
                  pts_clr_next, 
@@ -215,7 +154,7 @@ def edge_weights(pts_clr_curr,
                  nm_per_bp, 
                  pixel_dist, 
                  theta, 
-                 loci_dist,
+                 gene_dist,skips, cur_hyb, num_skip, iteration,
                  lim_min_dist = True):
     '''
     Input:
@@ -228,12 +167,12 @@ def edge_weights(pts_clr_curr,
         l_p_bp: float
             persistence length (bp)
         nm_per_bp: float
-            scaling factor converting genomic distance (bp) -> spatial distance (nm)
+            0.3nm per bp
         pixel_dist: float
             pixel size (nm)
         theta: float
             bond angle
-        loci_dist: [num_hyb x num_hyb] 
+        gene_dist: [num_hyb x num_hyb] 
             2D array of pairwise expected spatial distance given genomic distance
         lim_min_dist : boolean
             penalize successively choosing most proximal spot 
@@ -249,83 +188,50 @@ def edge_weights(pts_clr_curr,
         raise KeyError('pts_clr_curr and pts_clr_next must have the following columns: [x_hat, y_hat, z_hat, hyb, sig_x, sig_y, sig_z]')
                        
     if pts_clr_next['hyb'].size > 0:
-        if max(pts_clr_next['hyb']) > loci_dist.shape[0]:
-            raise IndexError('hyb index out of bounds with respect to loci_dist. Check if the correct reference genome is being used.')
+        if max(pts_clr_next['hyb']) > gene_dist.shape[0]:
+            raise IndexError('hyb index out of bounds with respect to gene_dist. Check if the correct reference genome is being used.')
 
     if not pts_clr_curr.hyb.is_monotonic_increasing or not pts_clr_next.hyb.is_monotonic_increasing:
         raise ValueError('hyb in both pts_clr_curr and pts_clr_next must be sorted in ascending order.')
                 
     if not all(isinstance(x, (int, float, np.int64, np.float64)) for x in [bin_size, l_p_bp, nm_per_bp, pixel_dist, theta]) or \
        not all(x >= 0 for x in [bin_size, l_p_bp, nm_per_bp, pixel_dist, theta]):
-        raise ValueError('bin_size, l_p_bp, nm_per_bp, pixel_dist, theta must be all positive numerical values.')
+        raise ValueError('bin_size, l_p_bp, nm_per_unit, pixel_dist, theta must be all positive numerical values.')
         
     # grab output shape
     shape = (pts_clr_curr.shape[0], pts_clr_next.shape[0])
     
     ##### OBSERVED ######
     # Calculate observed sq distance
-    sq_diff = cartesian_sqdiff(pts_clr_curr[['z_hat', 'y_hat', 'x_hat']], 
-                               pts_clr_next[['z_hat', 'y_hat', 'x_hat']] )
-    r_sq = np.sum(sq_diff, axis = 1)
+    real_distance_sqr = cdist(pts_clr_curr[['z_hat', 'y_hat', 'x_hat']], 
+                               pts_clr_next[['z_hat', 'y_hat', 'x_hat']],
+                               'sqeuclidean')
     #####################
-    
-    ##### EXPECTED ######
-    # Determine distances closer than expected
-    separation = cartesian_diff(pts_clr_curr['hyb'], pts_clr_next['hyb'])
-    # Disregard immediate linkage between adjacent monomers
-    separation[separation <= 1] = 0
 
-    # Calculate expected pixel distance sq
-    exp_len_sq = (separation * bin_size * nm_per_bp * (np.cos(theta)**separation ) / pixel_dist) **2
-    # Split expected sq distance along each axis
-    exp_len_sq_singaxis = np.array([(exp_len_sq)/3, (exp_len_sq)/3, (exp_len_sq)/3]).T
-    #####################
+    # calculate edge penalties
+    penalty_const, penalty_exp = edge_penalty(cur_hyb, skips, l_p_bp, nm_per_bp/pixel_dist, gene_dist, 1)
+    penalty_value_base = 3.
+    penalty_real_distance = single_edge_penalty(real_distance_sqr, penalty_value_base, penalty_threshold=1500,  pixel_dist=pixel_dist)
     
-    ### OBS -> X, Y, Z ###
-    # Replace any observed distance that are too close (may not be necessary)
-    if lim_min_dist:
-        sq_diff[np.where(r_sq < exp_len_sq)] = exp_len_sq_singaxis[np.where(r_sq < exp_len_sq)]
-    
-    # Split observed sq distance into indiv axis
-    z_sq = np.reshape(sq_diff[:, 0], shape)
-    y_sq = np.reshape(sq_diff[:, 1], shape)
-    x_sq = np.reshape(sq_diff[:, 2], shape)
-    ######################
-    
+
     #### UNCERTAINTY #####
     # Calculate uncertainty d.t. contour
-    s_sq_1 = check_lp_wgaps(pts_clr_curr['hyb'], 
+    s_sqr = calculate_s0_sqr(pts_clr_curr['hyb'], 
                             pts_clr_next['hyb'], 
-                            l_p_bp * nm_per_bp / pixel_dist, 
-                            loci_dist)
-    s_sq_1 = np.reshape(s_sq_1, shape)     
-
-    # Calculate uncertainty from Gaussian fitting of each point
-    s_sq_2 = cartesian_esqsum(pts_clr_curr[['sig_z', 'sig_y', 'sig_x']], 
-                              pts_clr_next[['sig_z', 'sig_y', 'sig_x']])
-    # Split into each axis
-    s_sq_2z = np.reshape(s_sq_2[:, 0], shape)
-    s_sq_2y = np.reshape(s_sq_2[:, 1], shape)
-    s_sq_2x = np.reshape(s_sq_2[:, 2], shape)
-
-    # Calculate total uncertainty
-    s_sq_z_tot = s_sq_1 + s_sq_2z
-    s_sq_y_tot = s_sq_1 + s_sq_2y
-    s_sq_x_tot = s_sq_1 + s_sq_2x
-    ######################
+                            l_p_bp, 
+                            (nm_per_bp / pixel_dist),
+                            gene_dist)
+    s_sqr = np.reshape(s_sqr, shape)     
     
     ### TRANSITION EDGE WEIGHTS ###
     # Calculate constant term
-    const = np.multiply( (1/ np.sqrt(2*np.pi*s_sq_z_tot)), (1/ np.sqrt(2*np.pi*s_sq_y_tot)))
-    const = np.multiply( const,                            (1/ np.sqrt(2*np.pi*s_sq_x_tot)))
+    const = 2/3*np.pi*s_sqr
     
     # Calculate exp term
-    exp = np.add( z_sq/(2*s_sq_z_tot) , y_sq/(2*s_sq_y_tot))
-    exp = np.add( exp,                  x_sq/(2*s_sq_x_tot))
+    exp = real_distance_sqr/s_sqr
     
     # Calculate negative log prob of Gaussian chain link
-    trans_prob = np.add(-np.log(const), exp)
-    ################################
+    trans_prob = 3/2*np.add(np.log(const)*penalty_const, exp*penalty_exp) + penalty_real_distance
     
     assert trans_prob.shape == shape 
     
@@ -333,7 +239,7 @@ def edge_weights(pts_clr_curr,
 
 
 def boundary_init(trans_mat, 
-                  loci_dist, 
+                  gene_dist_matrix, 
                   l_p_bp,
                   corr_fac,
                   n_colours, 
@@ -347,12 +253,12 @@ def boundary_init(trans_mat,
     Input:
         trans_mat: [ndarray]
             2D adjacency matrix
-        loci_dist: [num_hyb x num_hyb ndarray] 
-            2D array of pairwise expected spatial distance given genomic distance
+        gene_dist_matrix: [num_hyb x num_hyb ndarray] 
+            2D array of pairwise genomic distance
         l_p_bp: float
             persistence length (bp)
         corr_fac: float
-            scale genomic dist (bp) into pixels (e.g nm_per_bp / pixel_dist)
+            scale genomic dist (bp) into pixels (e.g nm_per_unit / pixel_dist)
         n_colours: float
             number of loci imaged for given chr
         cell_pts: [DataFrame]
@@ -380,11 +286,11 @@ def boundary_init(trans_mat,
     if not cell_pts['hyb'].is_monotonic_increasing:
         raise IndexError('cell_pts[hyb] not sorted.')
         
-    if not isinstance(trans_mat, np.ndarray) or not isinstance(loci_dist, np.ndarray):
-        raise TypeError('Adjacency matrix (trans_mat) and genomic distance (loci_dist) must both be numpy arrays.')
+    if not isinstance(trans_mat, np.ndarray) or not isinstance(gene_dist_matrix, np.ndarray):
+        raise TypeError('Adjacency matrix (trans_mat) and genomic distance (gene_dist_matrix) must both be numpy arrays.')
                 
-    if not loci_dist.shape[0] == loci_dist.shape[1] == n_colours:
-        raise ValueError('Dimension mismatch: loci_dist, trans_mat must both be n_colours x n_colours arrays.')
+    if not gene_dist_matrix.shape[0] == gene_dist_matrix.shape[1] == n_colours:
+        raise ValueError('Dimension mismatch: gene_dist_matrix, trans_mat must both be n_colours x n_colours arrays.')
         
     if not all(isinstance(x, (int, float, np.int64, np.float64)) for x in [l_p_bp, corr_fac, exp_stretch, stretch_factor]):
         raise TypeError('l_p_bp, corr_fac, exp_stretch, stretch_factor must be all positive numerical values.')
@@ -405,7 +311,7 @@ def boundary_init(trans_mat,
     small_num = 1e-26
 
     # get ideal genomic distance intervals
-    bp_intervals = [loci_dist[0][i] - loci_dist[0][i-1] for i in range(1, len(loci_dist[0]))]
+    bp_intervals = [gene_dist_matrix[0][i] - gene_dist_matrix[0][i-1] for i in range(1, len(gene_dist_matrix[0]))]
 
     # add "border" transition probabilities
     for h in range(n_colours):
@@ -419,11 +325,9 @@ def boundary_init(trans_mat,
 
         # calculate ideal bond prob
         # NB: imaginary linkages based on genomic dist (better behaviour)
-        ideal_l_arr_row = [log_bond(l_p_bp*corr_fac, exp_stretch*interval, 
-                                    stretch_factor*interval) for interval in bp_intervals[:h]]
+        ideal_l_arr_row = [log_bond(exp_stretch*interval, l_p_bp, corr_fac, stretch_factor) for interval in bp_intervals[:h]]
         stretch_bond_row = np.sum(ideal_l_arr_row)        
-        ideal_l_arr_col = [log_bond(l_p_bp*corr_fac, exp_stretch*interval, 
-                                    stretch_factor*interval) for interval in bp_intervals[h:]]
+        ideal_l_arr_col = [log_bond(exp_stretch*interval, l_p_bp, corr_fac, stretch_factor) for interval in bp_intervals[h:]]
         stretch_bond_col = np.sum(ideal_l_arr_col)
         
         # calculate values of transition prob
@@ -472,10 +376,11 @@ def boundary_init(trans_mat,
 def find_chr(cell_pts_input,
              gene_dist,
              bin_size,
-             nm_per_bp = .0004,
-             pixel_dist = 100.,
+             iteration, 
+             nm_per_unit = 0.3,
+             pixel_dist = 108.,
              l_p_bp = 150., 
-             stretch_factor = 1.2, 
+             stretch_factor = boundary_scale_factor, 
              exp_stretch = 1., 
              num_skip = 7, 
              total_num_skip_frac = 0.7,
@@ -500,8 +405,8 @@ def find_chr(cell_pts_input,
             reference genomic distances between locis imaged on given chr
         bin_size : float
             median base pair interval between genomic loci
-        nm_per_bp : float
-            length scale of chromosome
+        nm_per_unit : float
+            length scale of chromosome 
         pixel_dist : float
             nm of one pixel
         l_p_bp: float
@@ -531,26 +436,23 @@ def find_chr(cell_pts_input,
             conformational distribution function (CDF) of most likely polymer
     '''
     
-    if not stretch_factor > exp_stretch >= 1:
-        raise ValueError('stretch_factor must be greater than exp_stretch, which must be greater or equal to 1.')
+    #if not stretch_factor > exp_stretch >= 1:
+    #    raise ValueError('stretch_factor must be greater than exp_stretch, which must be greater or equal to 1.')
         
-    if not bin_size/l_p_bp >= 10:
-        raise ValueError('bin_size (countour length) must be >> l_p_bp. Double check the input persistence length and bin size.')
+    #if not bin_size/l_p_bp >= 10:
+    #    raise ValueError('bin_size (countour length) must be >> l_p_bp. Double check the input persistence length and bin size.')
         
     ## Define constants ##
     n_colours = len(gene_dist)
     total_num_skip = int(total_num_skip_frac*len(gene_dist)) 
-    corr_fac = nm_per_bp / pixel_dist
-    l_p = l_p_bp * nm_per_bp / pixel_dist # persistence length in pixels
+    corr_fac = nm_per_unit / pixel_dist
     init_skip = int(init_skip_frac*n_colours)
     end_skip = int((1-init_skip_frac)*n_colours)
-    loci_dist = find_loci_dist(gene_dist = gene_dist,
-                               nm_per_bp = nm_per_bp,
-                               pixel_dist = pixel_dist)
-    gdintervals = [loci_dist[0][i] - loci_dist[0][i-1] for i in range(1, len(loci_dist[0]))]
+    gene_dist_matrix = np.abs( np.array([gene_dist]* len(gene_dist)) - np.array([gene_dist]*len(gene_dist)).transpose() )
+    gdintervals = [gene_dist_matrix[0][i] - gene_dist_matrix[0][i-1] for i in range(1, len(gene_dist_matrix[0]))]
     
-    if not np.all([elem/l_p >= 10 for elem in gdintervals]):
-        raise ValueError('Spatial distance estimated from genomic intervals separating loci (contour length) must be >> l_p (pixel dist). Double check the input persistence length (l_p_bp) and reference genome intervals (gene_dist).')
+    #if not np.all([elem/l_p_bp >= 10 for elem in gdintervals]):
+    #    raise ValueError('Spatial distance estimated from genomic intervals separating loci (contour length) must be >> l_p (pixel dist). Double check the input persistence length (l_p_bp) and reference genome intervals (gene_dist).')
 
     # make copy of input dataframe
     cell_pts = copy.deepcopy(cell_pts_input)
@@ -570,12 +472,12 @@ def find_chr(cell_pts_input,
     trans_mat = np.zeros((n_states, n_states))
 
     for i in set(cell_pts['hyb']):
-
         # grab nodes of curr hyb and reachable hyb
         pts_clr_curr = cell_pts.loc[cell_pts['hyb']==i]
-        pts_clr_next = cell_pts.loc[cell_pts['hyb'].between(i, i+num_skip, inclusive = False)]
+        pts_clr_next = cell_pts.loc[cell_pts['hyb'].between(i, i+num_skip, inclusive = 'neither')]
 
         # grab node indeces in adjacency matrix
+
         ## NB: rows --> starting vertices | cols --> ending vertices
         rows = pts_clr_curr['CurrIndex'].values
         cols = pts_clr_next['CurrIndex'].values
@@ -587,27 +489,21 @@ def find_chr(cell_pts_input,
         next_hyb = i+1
         skips = np.array([pts_clr_next['hyb'].values,] * pts_clr_curr.shape[0] ) - np.min([next_hyb, n_colours-1])
 
-        # calculate edge penalties
-        penalty = edge_penalty(skips, l_p_bp, corr_fac, bin_size)
+        
 
         # calculate edge weights
         trans_prob = edge_weights(pts_clr_curr, pts_clr_next, 
                                   bin_size, l_p_bp, 
-                                  nm_per_bp, pixel_dist, 
-                                  theta, loci_dist, lim_min_dist)
-
-        # check if penalty to be applied
-        if norm_skip_penalty == True:
-            # apply skipping penalty
-            if len(trans_prob) > 0:
-                trans_prob = np.multiply(trans_prob, penalty)
+                                  nm_per_unit, pixel_dist, 
+                                  theta, gene_dist_matrix, 
+                                  skips,i, num_skip, iteration, lim_min_dist)
 
         # update transition matrix
         np.put(trans_mat, trans_idx, trans_prob)
 
     # calculate initial and terminal gap penalties
     trans_mat_pad = boundary_init(trans_mat=trans_mat,
-                                  loci_dist=loci_dist, 
+                                  gene_dist_matrix=gene_dist_matrix, 
                                   l_p_bp=l_p_bp,
                                   corr_fac=corr_fac,
                                   n_colours=n_colours,
@@ -618,31 +514,39 @@ def find_chr(cell_pts_input,
                                   init_skip=init_skip,
                                   end_skip=end_skip)
     
+    
     if not np.all(trans_mat_pad >= 0):
-        raise ValueError('Edge weights cannot be negative. Double check persistence length (l_p_bp), bin size (bin_size), distance parameter (nm_per_bp) and pixel distance (pixel_dist).')
+        raise ValueError('Edge weights cannot be negative. Double check persistence length (l_p_bp), bin size (bin_size), distance parameter (nm_per_unit) and pixel distance (pixel_dist).')
     
     # create discrete state space model
     G = igraph.Graph.Adjacency((trans_mat_pad > 0).tolist())
 
+
     # add edge weights
     G.es['weight'] = trans_mat_pad[trans_mat_pad.nonzero()]
-
+    
     # check boundary conditions
     if len(np.unique(cell_pts_input.hyb)) < len(gene_dist) - total_num_skip:
+        print('skipeed?')
         return trans_mat_pad, [], -1
+        
     else:
         try:
             # find shortest path (Dijkstra)
             shortest_path_length = G.shortest_paths(source = 0, 
                                                     target = trans_mat_pad.shape[0]-1, 
                                                     weights = 'weight')[0][0]
+            
             ## NB: path is written in index of FUTURE cell_pts dataframe (subsetted after iterative subtraction)
             shortest_path = [elem-1 for elem in G.get_shortest_paths(0, to = trans_mat_pad.shape[0]-1, 
                                                                      weights = 'weight')[0][1:-1]]
+            
+            
             if len(shortest_path) < len(gene_dist) - total_num_skip:
                 return trans_mat_pad, [], -1
         except:
             return trans_mat_pad, [], -1
+            
 
     return trans_mat_pad, shortest_path, shortest_path_length
 
@@ -650,18 +554,18 @@ def find_chr(cell_pts_input,
 def find_all_chr(cell_pts_input,
                  gene_dist,
                  bin_size,
-                 nm_per_bp = .0004,
-                 num_skip = 7,
+                 nm_per_unit = 0.3,
+                 num_skip = 5,
                  total_num_skip_frac = 0.7,
                  init_skip_frac = 0.15,
-                 pixel_dist = 100.,
+                 pixel_dist = 108.,
                  l_p_bp = 150., 
-                 stretch_factor = 1.2, 
+                 stretch_factor = boundary_scale_factor, 
                  exp_stretch = 1., 
                  theta = np.pi/20, 
                  norm_skip_penalty = True,
                  lim_init_skip = True,
-                 max_iter = 6):
+                 max_iter = 5):
     '''
     From a DataFrame cell_pts_input, iteratively builds graphs where transition probs based on 
     freely jointed chain model of DNA. Each iteration finds a most likely path, upon which
@@ -675,8 +579,8 @@ def find_all_chr(cell_pts_input,
             reference genomic distances between locis imaged on given chr
         bin_size : float
             median base pair interval between genomic loci
-        nm_per_bp : float
-            length scale of chromosome
+        nm_per_unit : float
+            np per bp
         num_skip: int
             number of locis allowed to skip for one step
         total_num_skip_frac: float
@@ -703,7 +607,7 @@ def find_all_chr(cell_pts_input,
     '''
     # define constants
     n_colours = len(gene_dist)
-    cd_func_scrambled = cdf_thresh(gene_dist, l_p_bp) # pass only genomic dist, not pixel dist
+    cdf_threshold_for_path = cdf_thresh(gene_dist, l_p_bp, nm_per_unit/pixel_dist)
     total_num_skip = int(total_num_skip_frac * len(gene_dist))
     
     # copy dataframe
@@ -732,7 +636,9 @@ def find_all_chr(cell_pts_input,
     last_len = cell_pts.shape[0]
     last_cdf = 0
     last_path = None
-    
+    all_put_chr_parameters = []
+    short_path_encountered = False
+
     for iteration in range(max_iter):
         
         if iteration == 0:
@@ -740,15 +646,14 @@ def find_all_chr(cell_pts_input,
                 break
         else:
             if (len(cell_pts) <= 0) or \
-               (len(cell_pts) == last_len) or \
-               (last_cdf >= cd_func_scrambled) or \
-               (len(last_path) < n_colours - total_num_skip):
+               (last_cdf >= cdf_threshold_for_path):
                 break
 
         _, path, cd_func = find_chr(cell_pts, 
                                     gene_dist = gene_dist,
-                                    bin_size = bin_size,
-                                    nm_per_bp = nm_per_bp, 
+                                    bin_size = bin_size, 
+                                    iteration = iteration,
+                                    nm_per_unit = nm_per_unit, 
                                     stretch_factor = stretch_factor, 
                                     num_skip = num_skip, 
                                     theta=theta,
@@ -760,8 +665,7 @@ def find_all_chr(cell_pts_input,
         put_chr = cell_pts.iloc[[elem for elem in path]]
         
         # threshold for visitation length and physical likelihood
-        if (len(path) >= n_colours - total_num_skip) and (cd_func < cd_func_scrambled):
-            
+        if (len(path) >= n_colours - total_num_skip) and (cd_func < cdf_threshold_for_path):
             # save chr
             all_put_chr.append(put_chr)
 

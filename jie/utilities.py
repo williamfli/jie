@@ -165,4 +165,44 @@ def check_lp_wgaps(left, right, l_p, loci_dist):
     s_sq1[np.where(locus_dist < 2*l_p)] = (locus_dist[np.where(locus_dist < 2*l_p)]**2)/3
     
     return s_sq1
+    
+
+def calculate_s0_sqr(left, right, l_p_bp, corr_factor, loci_dist):
+    '''
+    Input:
+        left : [DataFrame]
+            series of genomic order (t) for (L) starting nodes
+        right : [DataFrame]
+            series of genomic order (t) for (R) ending nodes
+        l_p_bp : float
+            persistence length
+        corr_factor: float
+            nm per unit / pixel dist
+        loci_dist: [ndarray]
+            n_loci x n_loci array of pairwise expected spatial distance given genomic distance
+            eg. [[0, 5kb*nm_per_bp/pixel_dist, 10kb*nm_per_bp/pixel_dist,  ...]
+                 [5kb*nm_per_bp/pixel_dist,  0, 5kb*nm_per_bp/pixel_dist,  ...]
+                 [10kb*nm_per_bp/pixel_dist, 5kb*nm_per_bp/pixel_dist, 0, ...]]
+    Output:
+        a : [ndarray]
+            (l+r) x 3 array of element-wise-squared cartesian sum
+            eg. (sz_r**2 + sz_l**2, sy_r**2 + sy_l**2, sx_r**2 + sx_l**2)
+    '''
+    
+    if not isinstance(left, pd.core.series.Series):
+        raise TypeError('The first input must be a pd.Series.')
+    if not isinstance(right, pd.core.series.Series):
+        raise TypeError('The second input must be a pd.Series.')
+    if not isinstance(l_p_bp, (int, float, np.int64, np.float64)):
+        raise TypeError('l_p must be a numerical value.')
+    if np.max(left) > loci_dist.shape[0] or np.max(right) > loci_dist.shape[0]:
+        raise IndexError('The locus index is out of bounds w.r.t. the loci_dist.')
+        
+    la, lb = len(left), len(right)
+    ia2, ib2 = np.broadcast_arrays(*np.ogrid[:la,:lb])
+    a = np.column_stack([left.values[ia2.ravel()], right.values[ib2.ravel()]])
+    locus_dist = np.array([loci_dist[int(i)][int(j)] for (i, j) in zip(a[:, 0], a[:, 1])])
+    s_sq = np.array([2*elem*l_p_bp*corr_factor**2 for elem in locus_dist])
+    
+    return s_sq
 
