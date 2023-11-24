@@ -60,8 +60,6 @@ def cdf_thresh(gene_dist, l_p_bp=150., corr_factor=0.3/108.):
     if not isinstance(gene_dist, Iterable):
         raise TypeError('gene_dist needs to be an iterable list of numerical values.')
         
-    if not isinstance(gene_dist[0], (int, float, np.int64, np.float64)):
-        raise TypeError('gene_dist needs to be an iterable list of numerical values.')
 
     if not np.all(np.diff(gene_dist) > 0):
         raise ValueError('gene_dist must be an ascending sorted list of numerical values.')
@@ -527,7 +525,6 @@ def find_chr(cell_pts_input,
     
     # check boundary conditions
     if len(np.unique(cell_pts_input.hyb)) < len(gene_dist) - total_num_skip:
-        print('skipeed?')
         return trans_mat_pad, [], -1
         
     else:
